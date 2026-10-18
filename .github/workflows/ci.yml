@@ -7,7 +7,8 @@ on:
 
 jobs:
   node:
-    runs-on: ubuntu-latest
+    # The existing command-policy tests intentionally use Windows path semantics.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -38,7 +39,7 @@ jobs:
               (Join-Path $PWD $path), [ref]$tokens, [ref]$errors
             ) | Out-Null
             if ($errors.Count -gt 0) {
-              $errors | ForEach-Object { Write-Error "$path: $_" }
+              $errors | ForEach-Object { Write-Error "${path}: $_" }
               throw "PowerShell syntax errors in $path"
             }
           }
