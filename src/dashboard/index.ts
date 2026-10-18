@@ -7,6 +7,7 @@ import path from "node:path";
 import { Request, Response, Router } from "express";
 import { ACCESS_TOKEN_TTL_SECONDS } from "../auth/store.js";
 import { AppConfig } from "../config.js";
+import { tunnelLaunch } from "../tunnel.js";
 import { Journal, JournalEntry } from "../journal.js";
 import { browserSessionDashboardSummaries, closeBrowserSessionForDashboard } from "../tools/browser.js";
 import { TOOL_DEFINITIONS } from "../tools/registry.js";
@@ -58,6 +59,7 @@ const CLOUDFLARED_EXE =
   process.env.CLOUDFLARED_EXE || path.join(os.homedir(), "Documents", "cloudflared", "cloudflared.exe");
 const CLOUDFLARED_CONFIG = process.env.CLOUDFLARED_CONFIG || path.join(os.homedir(), ".cloudflared", "config.yml");
 const TUNNEL_NAME = process.env.CLOUDFLARE_TUNNEL_NAME || "chatgpt-local-agent-mcp";
+const TUNNEL_TOKEN = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.TUNNEL_TOKEN;
 const LIVE_MONITOR_SCRIPT = path.join(process.cwd(), "scripts", "live-monitor.ps1");
 const DASHBOARD_CSRF_TOKEN = crypto.randomBytes(32).toString("base64url");
 
@@ -898,13 +900,30 @@ async function runPowerShell(command: string): Promise<string> {
   return result.stdout.trim();
 }
 
+function tunnelPidFile(): string {
+  return path.join(process.cwd(), "data", "cloudflared.pid");
+}
+
 async function tunnelProcess(): Promise<{ commandLine?: string; pid?: number }> {
+  // Track only processes that belong to this app, or the legacy named local tunnel.
+  // Never return raw process arguments: other cloudflared launchers may embed a secret --token.
+  const pidText = await fs.readFile(tunnelPidFile(), "utf8").catch(() => "");
+  const recordedPid = Number(pidText.trim());
+  const safePid = Number.isSafeInteger(recordedPid) && recordedPid > 0 ? recordedPid : 0;
+  const safeName = TUNNEL_NAME.replace(/'/g, "''");
   const script = `
-$process = Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.CommandLine -like '*${TUNNEL_NAME}*' } |
-  Select-Object -First 1 ProcessId,CommandLine
+$process = $null
+if (${safePid} -gt 0) {
+  $candidate = Get-CimInstance Win32_Process -Filter "ProcessId=${safePid}" -ErrorAction SilentlyContinue
+  if ($candidate -and $candidate.Name -eq 'cloudflared.exe') { $process = $candidate }
+}
+if (!$process) {
+  $process = Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*${safeName}*' } |
+    Select-Object -First 1
+}
 if ($process) {
-  [ordered]@{ pid = [int]$process.ProcessId; commandLine = [string]$process.CommandLine } | ConvertTo-Json -Compress
+  [ordered]@{ pid = [int]$process.ProcessId; commandLine = 'cloudflared.exe (arguments hidden)' } | ConvertTo-Json -Compress
 }
 `;
   const stdout = await runPowerShell(script);
@@ -923,39 +942,52 @@ function cloudflaredLogPaths(): { err: string; out: string } {
 async function startTunnel(): Promise<string> {
   const existing = await tunnelProcess();
   if (existing.pid) return `Tunnel already running, pid=${existing.pid}`;
+  // May already be managed by a Windows service, so do not start a duplicate connector.
+  if ((await health(`${process.env.PUBLIC_BASE_URL || "http://127.0.0.1:8789"}/healthz`)).ok &&
+      (process.env.PUBLIC_BASE_URL || "").startsWith("https://")) {
+    return "Public MCP endpoint already reachable; tunnel startup skipped.";
+  }
   if (!fsSync.existsSync(CLOUDFLARED_EXE)) {
     throw new Error(`cloudflared.exe not found at ${CLOUDFLARED_EXE}`);
   }
-  if (!fsSync.existsSync(CLOUDFLARED_CONFIG)) {
-    throw new Error(`cloudflared config not found at ${CLOUDFLARED_CONFIG}`);
+  const launch = tunnelLaunch(CLOUDFLARED_CONFIG, TUNNEL_NAME, TUNNEL_TOKEN);
+  if (launch.mode === "local" && !fsSync.existsSync(CLOUDFLARED_CONFIG)) {
+    throw new Error("Local tunnel config missing. For a Cloudflare-managed tunnel, configure CLOUDFLARE_TUNNEL_TOKEN instead.");
   }
   const logs = cloudflaredLogPaths();
   await fs.mkdir(path.dirname(logs.out), { recursive: true });
   const out = fsSync.openSync(logs.out, "a");
   const err = fsSync.openSync(logs.err, "a");
-  const child = spawn(
-    CLOUDFLARED_EXE,
-    ["tunnel", "--config", CLOUDFLARED_CONFIG, "run", TUNNEL_NAME],
-    {
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(CLOUDFLARED_EXE, launch.args, {
       detached: true,
-      env: { ...process.env, CLOUDFLARE_TUNNEL_ENABLED: "true" },
+      env: { ...process.env, ...launch.extraEnv, CLOUDFLARE_TUNNEL_ENABLED: "true" },
       stdio: ["ignore", out, err],
       windowsHide: true,
-    },
-  );
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", reject);
+    });
+  } finally {
+    fsSync.closeSync(out);
+    fsSync.closeSync(err);
+  }
+  if (!child.pid) throw new Error("cloudflared did not return a process ID");
+  await fs.writeFile(tunnelPidFile(), String(child.pid), { encoding: "utf8", mode: 0o600 });
   child.unref();
-  fsSync.closeSync(out);
-  fsSync.closeSync(err);
-  return `Tunnel started, pid=${child.pid}`;
+  return `Tunnel process started in ${launch.mode} mode, pid=${child.pid}; verify public health.`;
 }
 
 async function stopTunnel(): Promise<string> {
   const existing = await tunnelProcess();
-  if (!existing.pid) return "Tunnel is not running.";
+  if (!existing.pid) return "Tunnel is not running under this app.";
   const result = await runCommand("taskkill.exe", ["/PID", String(existing.pid), "/F"], 10_000);
   if (result.code !== 0) {
     throw new Error(result.stderr || result.stdout || `taskkill failed for pid=${existing.pid}`);
   }
+  await fs.rm(tunnelPidFile(), { force: true });
   return `Tunnel stopped, pid=${existing.pid}`;
 }
 
