@@ -297,7 +297,10 @@ The server `.env` should then use the same public base URL:
 ```env
 PUBLIC_BASE_URL=https://mcp.your-domain.example
 CLOUDFLARE_TUNNEL_ENABLED=true
-CLOUDFLARED_CONFIG=C:\Users\you\.cloudflared\config.yml
+# Remote-managed tunnel (stored privately in installer Configuration; not in Git):
+CLOUDFLARE_TUNNEL_TOKEN=
+# Local-managed tunnel only:
+CLOUDFLARED_CONFIG=
 ```
 
 If the tunnel is configured but `cloudflared` is not running, Cloudflare may show the tunnel as down and the public hostname may return an error such as `530`. Start the local server and the tunnel connector before connecting ChatGPT.
@@ -535,6 +538,8 @@ PUBLIC_BASE_URL=https://mcp.your-domain.example
 CLOUDFLARE_TUNNEL_ENABLED=true
 CLOUDFLARED_CONFIG=C:\Users\you\.cloudflared\config.yml
 ```
+
+The launcher supports two mutually exclusive authentication methods: `CLOUDFLARE_TUNNEL_TOKEN` for remotely managed tunnels (no local `config.yml` or `cert.pem`), or `CLOUDFLARED_CONFIG` for locally managed tunnels. Do not expose the tunnel token in command-line arguments; the launcher passes it in the child's environment.
 
 If Cloudflare shows the DNS record as a Tunnel but the tunnel status is `Down` with `0` active replicas, the dashboard configuration can still be correct. It means the local `cloudflared` connector is not currently connected.
 

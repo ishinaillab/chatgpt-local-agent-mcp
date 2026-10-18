@@ -169,6 +169,10 @@ function Get-TunnelName {
   return (Get-EnvValue "CLOUDFLARE_TUNNEL_NAME" "chatgpt-local-agent-mcp")
 }
 
+function Get-TunnelPidFile {
+  return (Join-Path $RuntimeDataDir "cloudflared.pid")
+}
+
 function Get-JournalPath {
   $configured = Get-EnvValue "GPT_FS_MCP_JOURNAL_PATH" ""
   if ([string]::IsNullOrWhiteSpace($configured)) {
@@ -282,6 +286,15 @@ function Get-McpProcess {
 }
 
 function Get-TunnelProcess {
+  $pidFile = Get-TunnelPidFile
+  if (Test-Path -LiteralPath $pidFile) {
+    $savedPid = 0
+    $savedText = (Get-Content -LiteralPath $pidFile -Raw).Trim()
+    if ([int]::TryParse($savedText, [ref]$savedPid) -and $savedPid -gt 0) {
+      $candidate = Get-CimInstance Win32_Process -Filter "ProcessId=$savedPid" -ErrorAction SilentlyContinue
+      if ($candidate -and $candidate.Name -eq "cloudflared.exe") { return $candidate }
+    }
+  }
   $tunnelName = Get-TunnelName
   Get-CimInstance Win32_Process -Filter "Name='cloudflared.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*$tunnelName*" } |
@@ -360,24 +373,43 @@ function Start-Tunnel {
   $cloudflaredExe = Get-CloudflaredExe
   $cloudflaredConfig = Get-CloudflaredConfig
   $tunnelName = Get-TunnelName
+  $tunnelToken = Get-EnvValue "CLOUDFLARE_TUNNEL_TOKEN" ""
   $existing = Get-TunnelProcess
   if ($existing) { return "Tunnel already running, pid=$($existing.ProcessId)" }
+  # A healthy external connector does not need another local process.
+  $publicUrl = Get-PublicBaseUrl
+  if ($publicUrl.StartsWith("https://")) {
+    try {
+      $probe = Invoke-WebRequest -UseBasicParsing -Uri "$publicUrl/healthz" -TimeoutSec 4
+      if ($probe.StatusCode -eq 200) { return "Public MCP endpoint is already reachable; tunnel startup skipped." }
+    } catch {}
+  }
   if (!(Test-Path -LiteralPath $cloudflaredExe)) { throw "cloudflared.exe not found at $cloudflaredExe" }
-  if (!(Test-Path -LiteralPath $cloudflaredConfig)) { throw "cloudflared config not found at $cloudflaredConfig" }
+  if ([string]::IsNullOrWhiteSpace($tunnelToken) -and !(Test-Path -LiteralPath $cloudflaredConfig)) {
+    throw "Local config.yml missing. Set CLOUDFLARE_TUNNEL_TOKEN for a Cloudflare-managed tunnel."
+  }
 
   $dataDir = $RuntimeLogDir
   New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
   $out = Join-Path $dataDir "cloudflared.out.log"
   $err = Join-Path $dataDir "cloudflared.err.log"
-  $args = "tunnel --config `"$cloudflaredConfig`" run $tunnelName"
-  $process = Start-Process -FilePath $cloudflaredExe -ArgumentList $args -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-  return "Tunnel started, pid=$($process.Id)"
+  $args = if ($tunnelToken) { "tunnel run" } else { "tunnel --config `"$cloudflaredConfig`" run $tunnelName" }
+  $previousToken = [Environment]::GetEnvironmentVariable("TUNNEL_TOKEN", "Process")
+  try {
+    if ($tunnelToken) { [Environment]::SetEnvironmentVariable("TUNNEL_TOKEN", $tunnelToken, "Process") }
+    $process = Start-Process -FilePath $cloudflaredExe -ArgumentList $args -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+  } finally {
+    [Environment]::SetEnvironmentVariable("TUNNEL_TOKEN", $previousToken, "Process")
+  }
+  Set-Content -LiteralPath (Get-TunnelPidFile) -Value $process.Id -NoNewline -Encoding Ascii
+  return "Tunnel process started, pid=$($process.Id); check public health."
 }
 
 function Stop-Tunnel {
   $process = Get-TunnelProcess
-  if (!$process) { return "Tunnel is not running." }
+  if (!$process) { return "No app-managed tunnel process found." }
   Stop-Process -Id $process.ProcessId -Force
+  Remove-Item -LiteralPath (Get-TunnelPidFile) -Force -ErrorAction SilentlyContinue
   return "Tunnel stopped, pid=$($process.ProcessId)"
 }
 

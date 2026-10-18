@@ -202,7 +202,10 @@ Example:
 ```env
 PUBLIC_BASE_URL=https://mcp.your-domain.example
 CLOUDFLARE_TUNNEL_ENABLED=true
-CLOUDFLARED_CONFIG=C:\Users\you\.cloudflared\config.yml
+# Remotely managed tunnel: provide its token in the installer's masked field.
+CLOUDFLARE_TUNNEL_TOKEN=
+# Locally managed tunnel only (leave empty for a remotely managed tunnel):
+CLOUDFLARED_CONFIG=
 ```
 
 ### 2. Enable auth for remote use
@@ -256,6 +259,14 @@ These are not GitHub credentials.
 If you delete and recreate the ChatGPT connector, ChatGPT may provide a different redirect URI. Update `OAUTH_REDIRECT_URIS` if that happens.
 
 ### 5. Start the local server and tunnel
+
+For a **remotely managed Cloudflare Tunnel**, select **Networking → Tunnels → your tunnel → Add a replica** in Cloudflare, then copy the token privately into the installer field **Cloudflare tunnel token (remote tunnel)**. Keep the token in your local private `.env`, never in Git, screenshots, command-line flags, or chat messages. The launcher passes it through the child process's `TUNNEL_TOKEN` environment variable and runs `cloudflared tunnel run`. **No `config.yml` or `cert.pem` is required for this mode.**
+
+For a **locally managed** tunnel, leave the token empty, supply the existing `config.yml` path, and retain the named-tunnel launch behavior. Do not configure both modes at the same time.
+
+If an externally managed Windows service already makes the public `/healthz` endpoint reachable, the launch action avoids creating a duplicate connector.
+
+### 5a. Choose your tunnel mode
 
 Before connecting ChatGPT, verify:
 

@@ -408,6 +408,7 @@ function Load-ConfigIntoUi {
   $script:DefaultCwd.Text = Get-MapValue $map "GPT_FS_MCP_DEFAULT_CWD" ""
   $script:CloudflaredExe.Text = Get-MapValue $map "CLOUDFLARED_EXE" ""
   $script:CloudflaredConfig.Text = Get-MapValue $map "CLOUDFLARED_CONFIG" ""
+  $script:CloudflaredToken.Text = Get-MapValue $map "CLOUDFLARE_TUNNEL_TOKEN" ""
   $script:TunnelName.Text = Get-MapValue $map "CLOUDFLARE_TUNNEL_NAME" "chatgpt-local-agent-mcp"
 }
 
@@ -425,6 +426,7 @@ function Get-ConfigSnapshotFromUi {
     GPT_FS_MCP_DEFAULT_CWD = $script:DefaultCwd.Text.Trim()
     CLOUDFLARED_EXE = $script:CloudflaredExe.Text.Trim()
     CLOUDFLARED_CONFIG = $script:CloudflaredConfig.Text.Trim()
+    CLOUDFLARE_TUNNEL_TOKEN = $script:CloudflaredToken.Text.Trim()
     CLOUDFLARE_TUNNEL_NAME = $script:TunnelName.Text.Trim()
   }
 }
@@ -711,6 +713,7 @@ $script:OauthRedirectUris = New-TextBox
 $script:DefaultCwd = New-TextBox
 $script:CloudflaredExe = New-TextBox
 $script:CloudflaredConfig = New-TextBox
+$script:CloudflaredToken = New-TextBox -Secret $true
 $script:TunnelName = New-TextBox
 
 Add-Field $configPanel "Auth required" $script:AuthRequired
@@ -724,7 +727,8 @@ Add-Field $configPanel "OAuth client secret" $script:OauthClientSecret
 Add-Field $configPanel "OAuth redirect URIs" $script:OauthRedirectUris
 Add-Field $configPanel "Default workspace" $script:DefaultCwd
 Add-Field $configPanel "cloudflared.exe" $script:CloudflaredExe
-Add-Field $configPanel "cloudflared config" $script:CloudflaredConfig
+Add-Field $configPanel "cloudflared config (local tunnel only)" $script:CloudflaredConfig
+Add-Field $configPanel "Cloudflare tunnel token (remote tunnel)" $script:CloudflaredToken
 Add-Field $configPanel "Tunnel name" $script:TunnelName
 
 $installTab = New-Object System.Windows.Forms.TabPage
